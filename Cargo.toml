@@ -1,0 +1,14 @@
+[package]
+name = "proxy-protocol"
+version = "0.1.0"
+authors = ["Mariell Hoversholm <proximyst@proximyst.com>"]
+edition = "2018"
+
+license = "MIT"
+description = "PROXY protocol parser and writer."
+documentation = "https://docs.rs/proxy-protocol/"
+repository = "https://github.com/Proximyst/proxy-protocol.git"
+
+[dependencies]
+bytes = "0.5"
+thiserror = "1"
