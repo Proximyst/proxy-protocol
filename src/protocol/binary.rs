@@ -1,5 +1,6 @@
 use crate::error::*;
 use bytes::{Buf as _, BufMut as _, Bytes, BytesMut};
+use std::net::IpAddr;
 
 /// The 12 bytes required to notify of being a V2 binary PROXY protocol
 /// connection.
@@ -51,6 +52,41 @@ pub enum ProxyAddress {
 }
 
 impl ProxyAddress {
+    pub fn from_ipaddr(first: IpAddr, second: IpAddr) -> Self {
+        let ipv4 = first.is_ipv4() && second.is_ipv4();
+        if ipv4 {
+            Self::IpV4 {
+                source: match first {
+                    IpAddr::V4(v4) => v4,
+                    IpAddr::V6(v6) => v6
+                        .to_ipv4()
+                        .expect("cannot both be ipv4 but not match ipv4"),
+                }
+                .octets(),
+                destination: match second {
+                    IpAddr::V4(v4) => v4,
+                    IpAddr::V6(v6) => v6
+                        .to_ipv4()
+                        .expect("cannot both be ipv4 but not match ipv4"),
+                }
+                .octets(),
+            }
+        } else {
+            Self::IpV6 {
+                source: match first {
+                    IpAddr::V4(v4) => v4.to_ipv6_mapped(),
+                    IpAddr::V6(v6) => v6,
+                }
+                .octets(),
+                destination: match second {
+                    IpAddr::V4(v4) => v4.to_ipv6_mapped(),
+                    IpAddr::V6(v6) => v6,
+                }
+                .octets(),
+            }
+        }
+    }
+
     pub fn read_addresses(
         family: ProxyAddressFamily,
         bytes: &mut Bytes,
