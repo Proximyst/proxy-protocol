@@ -253,7 +253,7 @@ impl ProxyHeader {
             return Err(DecodingError::BufferSmall(1));
         }
         // The last loop should have eaten the b'\r' or the b' '.
-        if buf.slice(..1) == b"\n"[..] {
+        if &buf.slice(..1) == &b"\n"[..] {
             buf.advance(1);
             return Ok(Self::Version1 {
                 family,
@@ -288,7 +288,7 @@ impl ProxyHeader {
             return Err(DecodingError::BufferSmall(1));
         }
         // The last loop should have eaten the b'\r'.
-        if buf.slice(..1) != b"\n"[..] {
+        if &buf.slice(..1) != &b"\n"[..] {
             buf.advance(1);
             return Err(Version1ParsingError::ExpectedCRLF.into());
         }
