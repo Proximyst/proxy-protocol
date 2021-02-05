@@ -170,7 +170,7 @@ impl ProxyHeader {
             return Err(DecodingError::BufferSmall(15));
         }
 
-        if &buf.bytes()[..15] == &version1::UNKNOWN_PROXY_HEADER[..] {
+        if &buf.slice(..15) == &version1::UNKNOWN_PROXY_HEADER[..] {
             buf.advance(15);
             return Ok(Self::Version1 {
                 family: version1::ProxyAddressFamily::Unknown,
@@ -199,7 +199,7 @@ impl ProxyHeader {
         if buf.remaining() < 2 {
             return Err(DecodingError::BufferSmall(2));
         }
-        if &buf.bytes()[..2] == &version1::CRLF[..] {
+        if &buf.slice(..2) == &version1::CRLF[..] {
             buf.advance(2);
             return Ok(Self::Version1 {
                 family,
@@ -253,7 +253,7 @@ impl ProxyHeader {
             return Err(DecodingError::BufferSmall(1));
         }
         // The last loop should have eaten the b'\r' or the b' '.
-        if &buf.bytes()[..1] == &[b'\n'] {
+        if &buf.slice(..1) == &b"\n"[..] {
             buf.advance(1);
             return Ok(Self::Version1 {
                 family,
@@ -288,7 +288,7 @@ impl ProxyHeader {
             return Err(DecodingError::BufferSmall(1));
         }
         // The last loop should have eaten the b'\r'.
-        if &buf.bytes()[..1] != &[b'\n'] {
+        if &buf.slice(..1) != &b"\n"[..] {
             buf.advance(1);
             return Err(Version1ParsingError::ExpectedCRLF.into());
         }
@@ -429,7 +429,7 @@ mod tests {
         }
         .encode()
         .unwrap();
-        assert_eq!(encoded.bytes(), &proxy[..]);
+        assert_eq!(encoded.freeze().slice(..), &proxy[..]);
 
         let proxy = b"PROXY UNKNOWN ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff 65535 65535\r\n";
         let mut bytes = Bytes::from(&proxy[..]);
@@ -475,7 +475,7 @@ mod tests {
         }
         .encode()
         .unwrap();
-        assert_eq!(encoded.bytes(), &proxy[..]);
+        assert_eq!(encoded.freeze().slice(..), &proxy[..]);
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod tests {
         .encode()
         .unwrap();
         assert_eq!(
-            encoded.bytes(),
+            encoded.freeze().slice(..),
             &[
                 0x0D,
                 0x0A,
