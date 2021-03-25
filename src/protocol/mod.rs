@@ -288,8 +288,8 @@ impl ProxyHeader {
             return Err(DecodingError::BufferSmall(1));
         }
         // The last loop should have eaten the b'\r'.
-        if &buf.slice(..1) != &b"\n"[..] {
-            buf.advance(1);
+        let c = buf.get_u8();
+        if c != b'\n' {
             return Err(Version1ParsingError::ExpectedCRLF.into());
         }
 
@@ -433,7 +433,9 @@ mod tests {
 
         let proxy = b"PROXY UNKNOWN ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff 65535 65535\r\n";
         let mut bytes = Bytes::from(&proxy[..]);
-        let header = match ProxyHeader::decode(&mut bytes) {
+        let header = ProxyHeader::decode(&mut bytes);
+        assert_eq!(bytes.len(), 0);
+        let header = match header {
             Ok(h) => h,
             Err(e) => panic!("unknown proxy not recognised 2: {:?} / {}", e, e),
         };
@@ -509,6 +511,7 @@ mod tests {
             ][..],
         );
         let header = ProxyHeader::decode(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), 0);
         assert_eq!(
             header,
             ProxyHeader::Version2 {
