@@ -1,10 +1,9 @@
+use bytes::Buf;
+use snafu::{ensure, OptionExt as _, ResultExt as _, Snafu};
 use std::{
     net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
     str::{FromStr as _, Utf8Error},
 };
-
-use bytes::Buf;
-use snafu::{ensure, OptionExt as _, ResultExt as _, Snafu};
 
 const CR: u8 = 0x0D;
 const LF: u8 = 0x0A;
