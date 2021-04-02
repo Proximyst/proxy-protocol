@@ -3,7 +3,6 @@ name = "proxy-protocol"
 version = "0.4.0"
 authors = ["Mariell Hoversholm <proximyst@proximyst.com>"]
 edition = "2018"
-publish = false # TODO (Mariell Hoversholm): Remove this.
 
 license = "MIT OR Apache-2.0"
 description = "PROXY protocol serializer and deserializer"
