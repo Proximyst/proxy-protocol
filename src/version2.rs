@@ -79,7 +79,7 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader> {
     let command = match command {
         0 => ProxyCommand::Local,
         1 => ProxyCommand::Proxy,
-        cmd @ _ => return UnknownCommand { cmd }.fail(),
+        cmd => return UnknownCommand { cmd }.fail(),
     };
 
     // 4 bits for address family, 4 bits for transport protocol,
@@ -92,13 +92,13 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader> {
         1 => ProxyAddressFamily::Inet,
         2 => ProxyAddressFamily::Inet6,
         3 => ProxyAddressFamily::Unix,
-        family @ _ => return UnknownAddressFamily { family }.fail(),
+        family => return UnknownAddressFamily { family }.fail(),
     };
     let transport_protocol = match byte << 4 >> 4 {
         0 => ProxyTransportProtocol::Unspec,
         1 => ProxyTransportProtocol::Stream,
         2 => ProxyTransportProtocol::Datagram,
-        protocol @ _ => return UnknownTransportProtocol { protocol }.fail(),
+        protocol => return UnknownTransportProtocol { protocol }.fail(),
     };
 
     let length = buf.get_u16() as usize;
