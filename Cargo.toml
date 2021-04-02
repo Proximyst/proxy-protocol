@@ -5,10 +5,19 @@ authors = ["Mariell Hoversholm <proximyst@proximyst.com>"]
 edition = "2018"
 
 license = "MIT"
-description = "PROXY protocol parser and writer."
+description = "PROXY protocol serializer and deserializer"
 documentation = "https://docs.rs/proxy-protocol/"
 repository = "https://github.com/Proximyst/proxy-protocol.git"
 
 [dependencies]
-bytes = "1"
-thiserror = "1"
+snafu = "~0.6"
+bytes = "~1"
+
+[dev-dependencies]
+pretty_assertions = "^0.7"
+rand = "~0.8"
+
+[features]
+default = []
+
+always_exhaustive = []
