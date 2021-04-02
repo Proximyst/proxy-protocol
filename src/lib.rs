@@ -125,7 +125,6 @@ fn parse_version(buf: &mut impl Buf) -> Result<u32> {
 /// NOTE: The buffer must have a continuous representation of the inner data
 /// available through [Buf::chunk], at the very least for the header. Data that
 /// follows may be chunked as you wish.
-#[must_use]
 pub fn parse(buf: &mut impl Buf) -> Result<ProxyHeader> {
     let version = match parse_version(buf) {
         Ok(ver) => ver,
