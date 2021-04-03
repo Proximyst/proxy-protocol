@@ -13,13 +13,13 @@
 pub mod version1;
 pub mod version2;
 
-use bytes::Buf;
+use bytes::{Buf, BytesMut};
 use snafu::{ensure, ResultExt as _, Snafu};
 
 #[derive(Debug, Snafu)]
 #[cfg_attr(not(feature = "always_exhaustive"), non_exhaustive)] // A new version may be added
 #[cfg_attr(test, derive(PartialEq, Eq))]
-pub enum Error {
+pub enum ParseError {
     /// This is not a PROXY header at all.
     #[snafu(display("the given data is not a PROXY header"))]
     NotProxyHeader,
@@ -30,14 +30,20 @@ pub enum Error {
 
     /// An error occurred while parsing version 1.
     #[snafu(display("there was an error while parsing the v1 header: {}", source))]
-    Version1 { source: version1::Error },
+    Version1 { source: version1::ParseError },
 
     /// An error occurred while parsing version 2.
     #[snafu(display("there was an error while parsing the v2 header: {}", source))]
-    Version2 { source: version2::Error },
+    Version2 { source: version2::ParseError },
 }
 
-type Result<T, E = Error> = std::result::Result<T, E>;
+#[derive(Debug, Snafu)]
+#[cfg_attr(not(feature = "always_exhaustive"), non_exhaustive)] // A new version may be added
+pub enum EncodeError {
+    /// An error occurred while encoding version 1.
+    #[snafu(display("there was an error while encoding the v1 header: {}", source))]
+    WriteVersion1 { source: version1::EncodeError },
+}
 
 /// The PROXY header emitted at most once at the start of a new connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +80,7 @@ pub enum ProxyHeader {
     },
 }
 
-fn parse_version(buf: &mut impl Buf) -> Result<u32> {
+fn parse_version(buf: &mut impl Buf) -> Result<u32, ParseError> {
     // There is a 6 byte header to v1, 12 byte to all binary versions.
     ensure!(buf.remaining() >= 6, NotProxyHeader);
 
@@ -125,7 +131,7 @@ fn parse_version(buf: &mut impl Buf) -> Result<u32> {
 /// NOTE: The buffer must have a continuous representation of the inner data
 /// available through [Buf::chunk], at the very least for the header. Data that
 /// follows may be chunked as you wish.
-pub fn parse(buf: &mut impl Buf) -> Result<ProxyHeader> {
+pub fn parse(buf: &mut impl Buf) -> Result<ProxyHeader, ParseError> {
     let version = match parse_version(buf) {
         Ok(ver) => ver,
         Err(e) => return Err(e),
@@ -138,8 +144,28 @@ pub fn parse(buf: &mut impl Buf) -> Result<ProxyHeader> {
     })
 }
 
+/// Encodes a PROXY header from the given header definition.
+///
+/// This will perform heap allocations; they're kept to a minimum, but there is
+/// no guarantee there will be only one.
+pub fn encode(header: ProxyHeader) -> Result<BytesMut, EncodeError> {
+    Ok(match header {
+        ProxyHeader::Version1 { addresses, .. } => {
+            version1::encode(addresses).context(WriteVersion1)?
+        }
+        ProxyHeader::Version2 {
+            command,
+            transport_protocol,
+            addresses,
+        } => version2::encode(command, transport_protocol, addresses),
+
+        #[allow(unreachable_patterns)] // May be required to be exhaustive.
+        _ => unimplemented!("Unimplemented version?"),
+    })
+}
+
 #[cfg(test)]
-mod tests {
+mod parse_tests {
     use super::*;
     use crate::ProxyHeader;
     use bytes::Bytes;
@@ -252,32 +278,32 @@ mod tests {
 
         assert_eq!(
             parse(&mut &b"PROXY UNKNOWN \r"[..]),
-            Err(Error::Version1 {
-                source: version1::Error::UnexpectedEof,
+            Err(ParseError::Version1 {
+                source: version1::ParseError::UnexpectedEof,
             }),
         );
         assert_eq!(
             parse(&mut &b"PROXY UNKNOWN \r\t\t\r"[..]),
-            Err(Error::Version1 {
-                source: version1::Error::UnexpectedEof,
+            Err(ParseError::Version1 {
+                source: version1::ParseError::UnexpectedEof,
             }),
         );
         assert_eq!(
             parse(&mut &b"PROXY UNKNOWN\r\r\r\r\rHello, world!"[..]),
-            Err(Error::Version1 {
-                source: version1::Error::UnexpectedEof,
+            Err(ParseError::Version1 {
+                source: version1::ParseError::UnexpectedEof,
             }),
         );
         assert_eq!(
             parse(&mut &b"PROXY UNKNOWN\nGET /index.html HTTP/1.0"[..]),
-            Err(Error::Version1 {
-                source: version1::Error::UnexpectedEof,
+            Err(ParseError::Version1 {
+                source: version1::ParseError::UnexpectedEof,
             }),
         );
         assert_eq!(
             parse(&mut &b"PROXY UNKNOWN\n"[..]),
-            Err(Error::Version1 {
-                source: version1::Error::UnexpectedEof,
+            Err(ParseError::Version1 {
+                source: version1::ParseError::UnexpectedEof,
             }),
         );
     }
@@ -586,8 +612,8 @@ mod tests {
 
         assert_eq!(
             parse(&mut &PREFIX_LOCAL[..]),
-            Err(Error::Version2 {
-                source: version2::Error::UnexpectedEof,
+            Err(ParseError::Version2 {
+                source: version2::ParseError::UnexpectedEof,
             }),
         );
 
@@ -607,8 +633,8 @@ mod tests {
                 .concat()
                 .as_slice(),
             ),
-            Err(Error::Version2 {
-                source: version2::Error::InsufficientLengthSpecified {
+            Err(ParseError::Version2 {
+                source: version2::ParseError::InsufficientLengthSpecified {
                     given: 3,
                     needs: 4 * 2 + 2 * 2,
                 },
@@ -636,7 +662,7 @@ mod tests {
                     1 << 4, // Version goes in upper half of the byte
                 ][..],
             ),
-            Err(Error::InvalidVersion { version: 1 }),
+            Err(ParseError::InvalidVersion { version: 1 }),
         );
     }
 
@@ -672,7 +698,7 @@ mod tests {
     fn test_version_parsing_errors() {
         assert_eq!(
             parse_version(&mut &b"Proximyst"[..]),
-            Err(Error::NotProxyHeader)
+            Err(ParseError::NotProxyHeader)
         );
     }
 }

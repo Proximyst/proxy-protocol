@@ -1,6 +1,7 @@
-use bytes::Buf;
+use bytes::{Buf, BufMut as _, BytesMut};
 use snafu::{ensure, OptionExt as _, ResultExt as _, Snafu};
 use std::{
+    io::Write as _,
     net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
     str::{FromStr as _, Utf8Error},
 };
@@ -10,7 +11,7 @@ const LF: u8 = 0x0A;
 
 #[derive(Debug, Snafu)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
-pub enum Error {
+pub enum ParseError {
     #[snafu(display("an unexpected eof was hit"))]
     UnexpectedEof,
 
@@ -33,7 +34,11 @@ pub enum Error {
     IllegalHeaderEnding,
 }
 
-type Result<T, E = Error> = std::result::Result<T, E>;
+#[derive(Debug, Snafu)]
+pub enum EncodeError {
+    #[snafu(display("could not write to the buffer"))]
+    StdIo { source: std::io::Error },
+}
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum ProxyAddressFamily {
@@ -65,7 +70,7 @@ fn count_till_first(haystack: &[u8], needle: u8) -> Option<usize> {
     None
 }
 
-pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader> {
+pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError> {
     ensure!(buf.remaining() >= 4, UnexpectedEof);
 
     let step = buf.get_u8();
@@ -191,8 +196,54 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader> {
     })
 }
 
+pub(crate) fn encode(addresses: ProxyAddresses) -> Result<BytesMut, EncodeError> {
+    if let ProxyAddresses::Unknown = addresses {
+        return Ok(BytesMut::from(&b"PROXY UNKNOWN\r\n"[..]));
+    }
+
+    // Reserve as much data as we're gonna need -- at most.
+    let mut buf = BytesMut::with_capacity(107).writer();
+    buf.write_all(&b"PROXY TCP"[..]).context(StdIo)?;
+
+    match addresses {
+        ProxyAddresses::Ipv4 {
+            source,
+            destination,
+        } => {
+            buf.write(&b"4 "[..]).context(StdIo)?;
+            write!(
+                buf,
+                "{} {} {} {}\r\n",
+                source.ip(),
+                destination.ip(),
+                source.port(),
+                destination.port(),
+            )
+            .context(StdIo)?;
+        }
+        ProxyAddresses::Ipv6 {
+            source,
+            destination,
+        } => {
+            buf.write(&b"6 "[..]).context(StdIo)?;
+            write!(
+                buf,
+                "{} {} {} {}\r\n",
+                source.ip(),
+                destination.ip(),
+                source.port(),
+                destination.port(),
+            )
+            .context(StdIo)?;
+        }
+        ProxyAddresses::Unknown => unreachable!(),
+    }
+
+    Ok(buf.into_inner())
+}
+
 #[cfg(test)]
-mod tests {
+mod parse_tests {
     use super::*;
     use crate::ProxyHeader;
     use bytes::Bytes;
@@ -310,25 +361,104 @@ mod tests {
 
     #[test]
     fn test_invalid_cases() {
-        assert_eq!(parse(&mut &b"UNKNOWN \r"[..]), Err(Error::UnexpectedEof));
+        assert_eq!(
+            parse(&mut &b"UNKNOWN \r"[..]),
+            Err(ParseError::UnexpectedEof)
+        );
         assert_eq!(
             parse(&mut &b"UNKNOWN \r\t\t\r"[..]),
-            Err(Error::UnexpectedEof),
+            Err(ParseError::UnexpectedEof),
         );
         assert_eq!(
             parse(&mut &b"UNKNOWN\r\r\r\r\rHello, world!"[..]),
-            Err(Error::UnexpectedEof),
+            Err(ParseError::UnexpectedEof),
         );
         assert_eq!(
             parse(&mut &b"UNKNOWN\nGET /index.html HTTP/1.0"[..]),
-            Err(Error::UnexpectedEof),
+            Err(ParseError::UnexpectedEof),
         );
-        assert_eq!(parse(&mut &b"UNKNOWN\n"[..]), Err(Error::UnexpectedEof));
+        assert_eq!(
+            parse(&mut &b"UNKNOWN\n"[..]),
+            Err(ParseError::UnexpectedEof)
+        );
     }
 
     #[test]
     fn test_crlf() {
         assert_eq!(CR, b'\r');
         assert_eq!(LF, b'\n');
+    }
+}
+
+#[cfg(test)]
+mod encode_tests {
+    use super::*;
+    use bytes::Bytes;
+    use pretty_assertions::assert_eq;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+
+    #[test]
+    fn test_unknown() {
+        let encoded = encode(ProxyAddresses::Unknown);
+        assert!(matches!(encoded, Ok(_)));
+        assert_eq!(encoded.unwrap(), &b"PROXY UNKNOWN\r\n"[..]);
+    }
+
+    #[test]
+    fn test_tcp4() {
+        let encoded = encode(ProxyAddresses::Ipv4 {
+            source: SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 987),
+            destination: SocketAddrV4::new(Ipv4Addr::new(255, 254, 253, 252), 12345),
+        });
+        assert!(matches!(encoded, Ok(_)));
+        assert_eq!(
+            encoded.unwrap(),
+            Bytes::from_static(&b"PROXY TCP4 1.2.3.4 255.254.253.252 987 12345\r\n"[..]),
+        );
+    }
+
+    #[test]
+    fn test_tcp6() {
+        let encoded = encode(ProxyAddresses::Ipv6 {
+            source: SocketAddrV6::new(Ipv6Addr::new(1, 2, 3, 4, 5, 6, 7, 8), 987, 0, 0),
+            destination: SocketAddrV6::new(
+                Ipv6Addr::new(65535, 65534, 65533, 65532, 0, 1, 2, 3),
+                12345,
+                0,
+                0,
+            ),
+        });
+        assert!(matches!(encoded, Ok(_)));
+        assert_eq!(
+            encoded.unwrap(),
+            Bytes::from_static(
+                &b"PROXY TCP6 1:2:3:4:5:6:7:8 ffff:fffe:fffd:fffc:0:1:2:3 987 12345\r\n"[..],
+            ),
+        );
+
+        let encoded = encode(ProxyAddresses::Ipv6 {
+            source: SocketAddrV6::new(Ipv6Addr::new(1, 2, 3, 4, 5, 6, 7, 8), 987, 0, 0),
+            destination: SocketAddrV6::new(
+                Ipv6Addr::new(65535, 65534, 0, 0, 0, 1, 2, 3),
+                12345,
+                0,
+                0,
+            ),
+        });
+        assert!(matches!(encoded, Ok(_)));
+        assert_eq!(
+            encoded.unwrap(),
+            Bytes::from_static(&b"PROXY TCP6 1:2:3:4:5:6:7:8 ffff:fffe::1:2:3 987 12345\r\n"[..]),
+        );
+
+        let encoded = encode(ProxyAddresses::Ipv6 {
+            source: SocketAddrV6::new(Ipv6Addr::new(1, 2, 3, 4, 5, 6, 7, 8), 987, 0, 0),
+            destination: SocketAddrV6::new(Ipv6Addr::new(0, 0, 0, 0, 0, 1, 2, 3), 12345, 0, 0),
+        });
+        assert!(matches!(encoded, Ok(_)));
+        assert_eq!(
+            encoded.unwrap(),
+            Bytes::from_static(&b"PROXY TCP6 1:2:3:4:5:6:7:8 ::1:2:3 987 12345\r\n"[..]),
+        );
     }
 }
