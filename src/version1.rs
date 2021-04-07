@@ -41,13 +41,6 @@ pub enum EncodeError {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub enum ProxyAddressFamily {
-    Unknown,
-    Tcp4,
-    Tcp6,
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum ProxyAddresses {
     Unknown,
     Ipv4 {
@@ -74,6 +67,14 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
     ensure!(buf.remaining() >= 4, UnexpectedEof);
 
     let step = buf.get_u8();
+
+    #[derive(PartialEq, Eq)]
+    enum ProxyAddressFamily {
+        Tcp4,
+        Tcp6,
+        Unknown,
+    }
+
     let address_family = match step {
         b'T' => {
             // Tcp4 / Tcp6
@@ -106,7 +107,6 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
             cr = b == CR;
         }
         return Ok(super::ProxyHeader::Version1 {
-            family: address_family,
             addresses: ProxyAddresses::Unknown,
         });
     }
@@ -191,7 +191,6 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
     };
 
     Ok(super::ProxyHeader::Version1 {
-        family: address_family,
         addresses,
     })
 }
@@ -254,7 +253,6 @@ mod parse_tests {
     #[test]
     fn test_valid_unknown_cases() {
         let unknown = Ok(ProxyHeader::Version1 {
-            family: ProxyAddressFamily::Unknown,
             addresses: ProxyAddresses::Unknown,
         });
         assert_eq!(parse(&mut &b"UNKNOWN\r\n"[..]), unknown);
@@ -286,7 +284,6 @@ mod parse_tests {
             j: u16,
         ) -> ProxyHeader {
             ProxyHeader::Version1 {
-                family: ProxyAddressFamily::Tcp4,
                 addresses: ProxyAddresses::Ipv4 {
                     source: SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), e),
                     destination: SocketAddrV4::new(Ipv4Addr::new(f, g, h, i), j),
@@ -321,7 +318,6 @@ mod parse_tests {
             r: u16,
         ) -> ProxyHeader {
             ProxyHeader::Version1 {
-                family: ProxyAddressFamily::Tcp6,
                 addresses: ProxyAddresses::Ipv6 {
                     source: SocketAddrV6::new(Ipv6Addr::new(a, b, c, d, e, f, g, h), i, 0, 0),
                     destination: SocketAddrV6::new(Ipv6Addr::new(j, k, l, m, n, o, p, q), r, 0, 0),
