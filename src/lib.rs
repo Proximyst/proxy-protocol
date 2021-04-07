@@ -53,13 +53,6 @@ pub enum ProxyHeader {
     /// "human-readable header format" (section 2.1), and consists of (at most)
     /// 107 bytes of data on the wire.
     Version1 {
-        /// The type of IP-addresses used.
-        ///
-        /// If this is [version1::ProxyAddressFamily::Unknown], all the other
-        /// values are zeroed. In any other case, the rest of the values must
-        /// have proper values.
-        family: version1::ProxyAddressFamily,
-
         /// The addresses used to connect to the proxy.
         addresses: version1::ProxyAddresses,
     },
@@ -176,7 +169,6 @@ mod parse_tests {
     #[test]
     fn test_version1() {
         let unknown = Ok(ProxyHeader::Version1 {
-            family: version1::ProxyAddressFamily::Unknown,
             addresses: version1::ProxyAddresses::Unknown,
         });
         assert_eq!(parse(&mut &b"PROXY UNKNOWN\r\n"[..]), unknown);
@@ -205,7 +197,6 @@ mod parse_tests {
             j: u16,
         ) -> ProxyHeader {
             ProxyHeader::Version1 {
-                family: version1::ProxyAddressFamily::Tcp4,
                 addresses: version1::ProxyAddresses::Ipv4 {
                     source: SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), e),
                     destination: SocketAddrV4::new(Ipv4Addr::new(f, g, h, i), j),
@@ -238,7 +229,6 @@ mod parse_tests {
             r: u16,
         ) -> ProxyHeader {
             ProxyHeader::Version1 {
-                family: version1::ProxyAddressFamily::Tcp6,
                 addresses: version1::ProxyAddresses::Ipv6 {
                     source: SocketAddrV6::new(Ipv6Addr::new(a, b, c, d, e, f, g, h), i, 0, 0),
                     destination: SocketAddrV6::new(Ipv6Addr::new(j, k, l, m, n, o, p, q), r, 0, 0),
