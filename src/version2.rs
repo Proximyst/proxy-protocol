@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut as _, BytesMut};
 use snafu::{ensure, Snafu};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
 #[derive(Debug, Snafu)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
@@ -38,12 +38,12 @@ pub enum ProxyTransportProtocol {
 pub enum ProxyAddresses {
     Unspec,
     Ipv4 {
-        source: (Ipv4Addr, Option<u16>),
-        destination: (Ipv4Addr, Option<u16>),
+        source: SocketAddrV4,
+        destination: SocketAddrV4,
     },
     Ipv6 {
-        source: (Ipv6Addr, Option<u16>),
-        destination: (Ipv6Addr, Option<u16>),
+        source: SocketAddrV6,
+        destination: SocketAddrV6,
     },
     Unix {
         source: [u8; 108],
@@ -162,13 +162,13 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
         });
     }
 
-    let read_port = transport_protocol != ProxyTransportProtocol::Unspec;
-    let port_length = if read_port { 4 } else { 0 };
-    let address_length = if address_family == ProxyAddressFamily::Inet {
-        8
-    } else {
-        32
+    let port_length = 4;
+    let address_length = match address_family {
+        ProxyAddressFamily::Inet => 8,
+        ProxyAddressFamily::Inet6 => 32,
+        _ => unreachable!(),
     };
+
     ensure!(
         length >= port_length + address_length,
         InsufficientLengthSpecified {
@@ -185,29 +185,31 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
         let mut data = [0u8; 4];
         buf.copy_to_slice(&mut data[..]);
         let source = Ipv4Addr::from(data);
-        let source_port = if read_port { Some(buf.get_u16()) } else { None };
 
         buf.copy_to_slice(&mut data);
         let destination = Ipv4Addr::from(data);
-        let destination_port = if read_port { Some(buf.get_u16()) } else { None };
+
+        let source_port = buf.get_u16();
+        let destination_port = buf.get_u16();
 
         ProxyAddresses::Ipv4 {
-            source: (source, source_port),
-            destination: (destination, destination_port),
+            source: SocketAddrV4::new(source, source_port),
+            destination: SocketAddrV4::new(destination, destination_port),
         }
     } else {
         let mut data = [0u8; 16];
         buf.copy_to_slice(&mut data);
         let source = Ipv6Addr::from(data);
-        let source_port = if read_port { Some(buf.get_u16()) } else { None };
 
         buf.copy_to_slice(&mut data);
         let destination = Ipv6Addr::from(data);
-        let destination_port = if read_port { Some(buf.get_u16()) } else { None };
+
+        let source_port = buf.get_u16();
+        let destination_port = buf.get_u16();
 
         ProxyAddresses::Ipv6 {
-            source: (source, source_port),
-            destination: (destination, destination_port),
+            source: SocketAddrV6::new(source, source_port, 0, 0),
+            destination: SocketAddrV6::new(destination, destination_port, 0, 0),
         }
     };
 
@@ -341,15 +343,14 @@ pub(crate) fn encode(
     // > };
     let len = match addresses {
         ProxyAddresses::Unspec => 0,
-        ProxyAddresses::Unix {
-            source,
-            destination,
-        } => source.len() + destination.len(),
-        ProxyAddresses::Ipv4 { source, .. } => {
-            4 + 4 + if let Some(_) = source.1 { 2 + 2 } else { 0 }
+        ProxyAddresses::Unix { .. } => {
+            108 + 108
         }
-        ProxyAddresses::Ipv6 { source, .. } => {
-            16 + 16 + if let Some(_) = source.1 { 2 + 2 } else { 0 }
+        ProxyAddresses::Ipv4 { .. } => {
+            4 + 4 + 2 + 2
+        }
+        ProxyAddresses::Ipv6 { .. } => {
+            16 + 16 + 2 + 2
         }
     };
 
@@ -371,27 +372,19 @@ pub(crate) fn encode(
             source,
             destination,
         } => {
-            buf.put_slice(&source.0.octets()[..]);
-            if let Some(port) = source.1 {
-                buf.put_u16(port);
-            }
-            buf.put_slice(&destination.0.octets()[..]);
-            if let Some(port) = destination.1 {
-                buf.put_u16(port);
-            }
+            buf.put_slice(&source.ip().octets()[..]);
+            buf.put_slice(&destination.ip().octets()[..]);
+            buf.put_u16(source.port());
+            buf.put_u16(destination.port());
         }
         ProxyAddresses::Ipv6 {
             source,
             destination,
         } => {
-            buf.put_slice(&source.0.octets()[..]);
-            if let Some(port) = source.1 {
-                buf.put_u16(port);
-            }
-            buf.put_slice(&destination.0.octets()[..]);
-            if let Some(port) = destination.1 {
-                buf.put_u16(port);
-            }
+            buf.put_slice(&source.ip().octets()[..]);
+            buf.put_slice(&destination.ip().octets()[..]);
+            buf.put_u16(source.port());
+            buf.put_u16(destination.port());
         }
     }
 
@@ -449,15 +442,15 @@ mod parse_tests {
                     0,
                     0,
                     1,
-                    // Source port
-                    // 65535 = [255, 255]
-                    255,
-                    255,
                     // Destination IP
                     192,
                     168,
                     0,
                     1,
+                    // Source port
+                    // 65535 = [255, 255]
+                    255,
+                    255,
                     // Destination port
                     // 257 = [1, 1]
                     1,
@@ -472,8 +465,8 @@ mod parse_tests {
                 command: ProxyCommand::Proxy,
                 transport_protocol: ProxyTransportProtocol::Stream,
                 addresses: ProxyAddresses::Ipv4 {
-                    source: (Ipv4Addr::new(127, 0, 0, 1), Some(65535)),
-                    destination: (Ipv4Addr::new(192, 168, 0, 1), Some(257)),
+                    source: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 65535),
+                    destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 257),
                 },
             })
         );
@@ -492,14 +485,14 @@ mod parse_tests {
                 0,
                 0,
                 0,
-                // Source port
-                0,
-                0,
                 // Destination IP
                 255,
                 255,
                 255,
                 255,
+                // Source port
+                0,
+                0,
                 // Destination port
                 255,
                 0,
@@ -516,8 +509,8 @@ mod parse_tests {
                 command: ProxyCommand::Local,
                 transport_protocol: ProxyTransportProtocol::Datagram,
                 addresses: ProxyAddresses::Ipv4 {
-                    source: (Ipv4Addr::new(0, 0, 0, 0), Some(0)),
-                    destination: (Ipv4Addr::new(255, 255, 255, 255), Some(255 << 8)),
+                    source: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
+                    destination: SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 255 << 8),
                 },
             })
         );
@@ -554,10 +547,6 @@ mod parse_tests {
                     255,
                     255,
                     255,
-                    // Source port
-                    // 65535 = [255, 255]
-                    255,
-                    255,
                     // Destination IP
                     0,
                     0,
@@ -575,6 +564,10 @@ mod parse_tests {
                     0,
                     0,
                     0,
+                    // Source port
+                    // 65535 = [255, 255]
+                    255,
+                    255,
                     // Destination port
                     // 257 = [1, 1]
                     1,
@@ -589,11 +582,18 @@ mod parse_tests {
                 command: ProxyCommand::Proxy,
                 transport_protocol: ProxyTransportProtocol::Datagram,
                 addresses: ProxyAddresses::Ipv6 {
-                    source: (
+                    source: SocketAddrV6::new(
                         Ipv6Addr::new(65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535),
-                        Some(65535),
+                        65535,
+                        0,
+                        0,
                     ),
-                    destination: (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), Some(257)),
+                    destination: SocketAddrV6::new(
+                        Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0),
+                        257,
+                        0,
+                        0,
+                    ),
                 },
             })
         );
@@ -624,9 +624,6 @@ mod parse_tests {
                 90,
                 55,
                 66,
-                // Source port
-                123,
-                0,
                 // Destination IP
                 255,
                 255,
@@ -644,6 +641,9 @@ mod parse_tests {
                 21,
                 42,
                 42,
+                // Source port
+                123,
+                0,
                 // Destination port
                 255,
                 255,
@@ -660,13 +660,17 @@ mod parse_tests {
                 command: ProxyCommand::Local,
                 transport_protocol: ProxyTransportProtocol::Stream,
                 addresses: ProxyAddresses::Ipv6 {
-                    source: (
+                    source: SocketAddrV6::new(
                         Ipv6Addr::new(20828, 52, 21260, 65348, 4869, 28616, 13914, 14146),
-                        Some(31488),
+                        31488,
+                        0,
+                        0,
                     ),
-                    destination: (
+                    destination: SocketAddrV6::new(
                         Ipv6Addr::new(65535, 65535, 0, 0, 31611, 17733, 5397, 10794),
-                        Some(65535),
+                        65535,
+                        0,
+                        0,
                     ),
                 },
             })
@@ -745,8 +749,8 @@ mod encode_tests {
                 ProxyCommand::Proxy,
                 ProxyTransportProtocol::Unspec,
                 ProxyAddresses::Ipv4 {
-                    source: (Ipv4Addr::new(1, 2, 3, 4), Some(65535)),
-                    destination: (Ipv4Addr::new(192, 168, 0, 1), Some(9012)),
+                    source: SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 65535),
+                    destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 9012),
                 },
             ),
             signed(
@@ -759,12 +763,12 @@ mod encode_tests {
                     2,
                     3,
                     4,
-                    255,
-                    255,
                     192,
                     168,
                     0,
                     1,
+                    255,
+                    255,
                     (9012u16 >> 8) as u8,
                     9012u16 as u8,
                 ][..]
@@ -779,8 +783,8 @@ mod encode_tests {
                 ProxyCommand::Proxy,
                 ProxyTransportProtocol::Stream,
                 ProxyAddresses::Ipv4 {
-                    source: (Ipv4Addr::new(1, 2, 3, 4), Some(65535)),
-                    destination: (Ipv4Addr::new(192, 168, 0, 1), Some(9012)),
+                    source: SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 65535),
+                    destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 9012),
                 },
             ),
             signed(
@@ -793,12 +797,12 @@ mod encode_tests {
                     2,
                     3,
                     4,
-                    255,
-                    255,
                     192,
                     168,
                     0,
                     1,
+                    255,
+                    255,
                     (9012u16 >> 8) as u8,
                     9012u16 as u8,
                 ][..]
@@ -809,8 +813,8 @@ mod encode_tests {
                 ProxyCommand::Local,
                 ProxyTransportProtocol::Datagram,
                 ProxyAddresses::Ipv4 {
-                    source: (Ipv4Addr::new(255, 255, 255, 255), None),
-                    destination: (Ipv4Addr::new(192, 168, 0, 1), None),
+                    source: SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 324),
+                    destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 2187),
                 },
             ),
             signed(
@@ -818,7 +822,7 @@ mod encode_tests {
                     (2 << 4) | 0,
                     (1 << 4) | 2,
                     0,
-                    8,
+                    12,
                     255,
                     255,
                     255,
@@ -827,6 +831,10 @@ mod encode_tests {
                     168,
                     0,
                     1,
+                    (324u16 >> 8) as u8,
+                    324u16 as u8,
+                    (2187 >> 8) as u8,
+                    2187u16 as u8,
                 ][..]
             ),
         );
@@ -839,10 +847,17 @@ mod encode_tests {
                 ProxyCommand::Local,
                 ProxyTransportProtocol::Datagram,
                 ProxyAddresses::Ipv6 {
-                    source: (Ipv6Addr::new(1, 2, 3, 4, 5, 6, 7, 8), Some(8192)),
-                    destination: (
+                    source: SocketAddrV6::new(
+                        Ipv6Addr::new(1, 2, 3, 4, 5, 6, 7, 8),
+                        8192,
+                        0,
+                        0,
+                    ),
+                    destination: SocketAddrV6::new(
                         Ipv6Addr::new(65535, 65535, 32767, 32766, 111, 222, 333, 444),
-                        Some(0),
+                        0,
+                        0,
+                        0,
                     ),
                 }
             ),
@@ -868,8 +883,6 @@ mod encode_tests {
                     7,
                     0,
                     8,
-                    (8192u16 >> 8) as u8,
-                    8192u16 as u8,
                     255,
                     255,
                     255,
@@ -886,6 +899,8 @@ mod encode_tests {
                     333u16 as u8,
                     (444u16 >> 8) as u8,
                     444u16 as u8,
+                    (8192u16 >> 8) as u8,
+                    8192u16 as u8,
                     0,
                     0,
                 ][..]

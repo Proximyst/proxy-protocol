@@ -374,15 +374,15 @@ mod parse_tests {
                         0,
                         0,
                         1,
-                        // Source port
-                        // 65535 = [255, 255]
-                        255,
-                        255,
                         // Destination IP
                         192,
                         168,
                         0,
                         1,
+                        // Source port
+                        // 65535 = [255, 255]
+                        255,
+                        255,
                         // Destination port
                         // 257 = [1, 1]
                         1,
@@ -400,8 +400,8 @@ mod parse_tests {
                 command: version2::ProxyCommand::Proxy,
                 transport_protocol: version2::ProxyTransportProtocol::Stream,
                 addresses: version2::ProxyAddresses::Ipv4 {
-                    source: (Ipv4Addr::new(127, 0, 0, 1), Some(65535)),
-                    destination: (Ipv4Addr::new(192, 168, 0, 1), Some(257)),
+                    source: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 65535),
+                    destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 257),
                 },
             })
         );
@@ -420,14 +420,14 @@ mod parse_tests {
                     0,
                     0,
                     0,
-                    // Source port
-                    0,
-                    0,
                     // Destination IP
                     255,
                     255,
                     255,
                     255,
+                    // Source port
+                    0,
+                    0,
                     // Destination port
                     255,
                     0,
@@ -446,8 +446,8 @@ mod parse_tests {
                 command: version2::ProxyCommand::Local,
                 transport_protocol: version2::ProxyTransportProtocol::Datagram,
                 addresses: version2::ProxyAddresses::Ipv4 {
-                    source: (Ipv4Addr::new(0, 0, 0, 0), Some(0)),
-                    destination: (Ipv4Addr::new(255, 255, 255, 255), Some(255 << 8)),
+                    source: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
+                    destination: SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 255 << 8),
                 },
             })
         );
@@ -481,10 +481,6 @@ mod parse_tests {
                         255,
                         255,
                         255,
-                        // Source port
-                        // 65535 = [255, 255]
-                        255,
-                        255,
                         // Destination IP
                         0,
                         0,
@@ -502,6 +498,10 @@ mod parse_tests {
                         0,
                         0,
                         0,
+                        // Source port
+                        // 65535 = [255, 255]
+                        255,
+                        255,
                         // Destination port
                         // 257 = [1, 1]
                         1,
@@ -519,11 +519,18 @@ mod parse_tests {
                 command: version2::ProxyCommand::Proxy,
                 transport_protocol: version2::ProxyTransportProtocol::Datagram,
                 addresses: version2::ProxyAddresses::Ipv6 {
-                    source: (
+                    source: SocketAddrV6::new(
                         Ipv6Addr::new(65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535),
-                        Some(65535),
+                        65535,
+                        0,
+                        0,
                     ),
-                    destination: (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), Some(257)),
+                    destination: SocketAddrV6::new(
+                        Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0),
+                        257,
+                        0,
+                        0,
+                    )
                 },
             })
         );
@@ -554,9 +561,6 @@ mod parse_tests {
                     90,
                     55,
                     66,
-                    // Source port
-                    123,
-                    0,
                     // Destination IP
                     255,
                     255,
@@ -574,6 +578,9 @@ mod parse_tests {
                     21,
                     42,
                     42,
+                    // Source port
+                    123,
+                    0,
                     // Destination port
                     255,
                     255,
@@ -592,13 +599,17 @@ mod parse_tests {
                 command: version2::ProxyCommand::Local,
                 transport_protocol: version2::ProxyTransportProtocol::Stream,
                 addresses: version2::ProxyAddresses::Ipv6 {
-                    source: (
+                    source: SocketAddrV6::new(
                         Ipv6Addr::new(20828, 52, 21260, 65348, 4869, 28616, 13914, 14146),
-                        Some(31488),
+                        31488,
+                        0,
+                        0,
                     ),
-                    destination: (
+                    destination: SocketAddrV6::new(
                         Ipv6Addr::new(65535, 65535, 0, 0, 31611, 17733, 5397, 10794),
-                        Some(65535),
+                        65535,
+                        0,
+                        0,
                     ),
                 },
             })
