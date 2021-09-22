@@ -639,6 +639,9 @@ mod parse_tests {
                         // 3 bytes is clearly too few if we expect 2 IPv4s and ports
                         0,
                         3,
+                        0,
+                        0,
+                        0,
                     ][..],
                 ]
                 .concat()

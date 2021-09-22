@@ -100,18 +100,7 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
     };
 
     let length = buf.get_u16() as usize;
-
-    if address_family == ProxyAddressFamily::Unspec {
-        // We have no information to parse.
-        ensure!(buf.remaining() >= length, UnexpectedEof);
-        buf.advance(length);
-
-        return Ok(super::ProxyHeader::Version2 {
-            command,
-            transport_protocol,
-            addresses: ProxyAddresses::Unspec,
-        });
-    }
+    ensure!(buf.remaining() >= length, UnexpectedEof);
 
     // Time to parse the following:
     //
@@ -134,88 +123,73 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
     // >     } unix_addr;
     // > };
 
-    if address_family == ProxyAddressFamily::Unix {
-        ensure!(
-            length >= 108 * 2,
-            InsufficientLengthSpecified {
-                given: length,
-                needs: 108usize * 2,
-            },
-        );
-        ensure!(buf.remaining() >= 108 * 2, UnexpectedEof);
-        let mut source = [0u8; 108];
-        let mut destination = [0u8; 108];
-        buf.copy_to_slice(&mut source[..]);
-        buf.copy_to_slice(&mut destination[..]);
-        // TODO(Mariell Hoversholm): Support TLVs
-        if length > 108 * 2 {
-            buf.advance(length - (108 * 2));
-        }
-
-        return Ok(super::ProxyHeader::Version2 {
-            command,
-            transport_protocol,
-            addresses: ProxyAddresses::Unix {
-                source,
-                destination,
-            },
-        });
-    }
-
-    let port_length = 4;
+    // The full length of address data,
+    // including two addresses and two ports
     let address_length = match address_family {
-        ProxyAddressFamily::Inet => 8,
-        ProxyAddressFamily::Inet6 => 32,
-        _ => unreachable!(),
+        ProxyAddressFamily::Inet => (4 + 2) * 2,
+        ProxyAddressFamily::Inet6 => (16 + 2) * 2,
+        ProxyAddressFamily::Unix => 108 * 2,
+        ProxyAddressFamily::Unspec => 0,
     };
 
     ensure!(
-        length >= port_length + address_length,
+        length >= address_length,
         InsufficientLengthSpecified {
             given: length,
-            needs: port_length + address_length,
+            needs: address_length,
         },
     );
-    ensure!(
-        buf.remaining() >= port_length + address_length,
-        UnexpectedEof,
-    );
+    ensure!(buf.remaining() >= address_length, UnexpectedEof,);
 
-    let addresses = if address_family == ProxyAddressFamily::Inet {
-        let mut data = [0u8; 4];
-        buf.copy_to_slice(&mut data[..]);
-        let source = Ipv4Addr::from(data);
-
-        buf.copy_to_slice(&mut data);
-        let destination = Ipv4Addr::from(data);
-
-        let source_port = buf.get_u16();
-        let destination_port = buf.get_u16();
-
-        ProxyAddresses::Ipv4 {
-            source: SocketAddrV4::new(source, source_port),
-            destination: SocketAddrV4::new(destination, destination_port),
+    let addresses = match address_family {
+        ProxyAddressFamily::Unspec => ProxyAddresses::Unspec,
+        ProxyAddressFamily::Unix => {
+            let mut source = [0u8; 108];
+            let mut destination = [0u8; 108];
+            buf.copy_to_slice(&mut source[..]);
+            buf.copy_to_slice(&mut destination[..]);
+            ProxyAddresses::Unix {
+                source,
+                destination,
+            }
         }
-    } else {
-        let mut data = [0u8; 16];
-        buf.copy_to_slice(&mut data);
-        let source = Ipv6Addr::from(data);
+        ProxyAddressFamily::Inet => {
+            let mut data = [0u8; 4];
+            buf.copy_to_slice(&mut data[..]);
+            let source = Ipv4Addr::from(data);
 
-        buf.copy_to_slice(&mut data);
-        let destination = Ipv6Addr::from(data);
+            buf.copy_to_slice(&mut data);
+            let destination = Ipv4Addr::from(data);
 
-        let source_port = buf.get_u16();
-        let destination_port = buf.get_u16();
+            let source_port = buf.get_u16();
+            let destination_port = buf.get_u16();
 
-        ProxyAddresses::Ipv6 {
-            source: SocketAddrV6::new(source, source_port, 0, 0),
-            destination: SocketAddrV6::new(destination, destination_port, 0, 0),
+            ProxyAddresses::Ipv4 {
+                source: SocketAddrV4::new(source, source_port),
+                destination: SocketAddrV4::new(destination, destination_port),
+            }
+        }
+        ProxyAddressFamily::Inet6 => {
+            let mut data = [0u8; 16];
+            buf.copy_to_slice(&mut data);
+            let source = Ipv6Addr::from(data);
+
+            buf.copy_to_slice(&mut data);
+            let destination = Ipv6Addr::from(data);
+
+            let source_port = buf.get_u16();
+            let destination_port = buf.get_u16();
+
+            ProxyAddresses::Ipv6 {
+                source: SocketAddrV6::new(source, source_port, 0, 0),
+                destination: SocketAddrV6::new(destination, destination_port, 0, 0),
+            }
         }
     };
 
-    if length > port_length + address_length {
+    if length > address_length {
         // TODO(Mariell Hoversholm): Implement TLVs
-        buf.advance(length - (port_length + address_length));
+        buf.advance(length - address_length);
     }
 
     Ok(super::ProxyHeader::Version2 {
@@ -343,15 +317,9 @@ pub(crate) fn encode(
     // > };
     let len = match addresses {
         ProxyAddresses::Unspec => 0,
-        ProxyAddresses::Unix { .. } => {
-            108 + 108
-        }
-        ProxyAddresses::Ipv4 { .. } => {
-            4 + 4 + 2 + 2
-        }
-        ProxyAddresses::Ipv6 { .. } => {
-            16 + 16 + 2 + 2
-        }
+        ProxyAddresses::Unix { .. } => 108 + 108,
+        ProxyAddresses::Ipv4 { .. } => 4 + 4 + 2 + 2,
+        ProxyAddresses::Ipv6 { .. } => 16 + 16 + 2 + 2,
     };
 
     let mut buf = BytesMut::with_capacity(16 + len);
@@ -698,6 +666,9 @@ mod parse_tests {
                     // 3 bytes is clearly too few if we expect 2 IPv4s and ports
                     0,
                     3,
+                    0,
+                    0,
+                    0,
                 ][..]
             ),
             Err(ParseError::InsufficientLengthSpecified {
@@ -847,12 +818,7 @@ mod encode_tests {
                 ProxyCommand::Local,
                 ProxyTransportProtocol::Datagram,
                 ProxyAddresses::Ipv6 {
-                    source: SocketAddrV6::new(
-                        Ipv6Addr::new(1, 2, 3, 4, 5, 6, 7, 8),
-                        8192,
-                        0,
-                        0,
-                    ),
+                    source: SocketAddrV6::new(Ipv6Addr::new(1, 2, 3, 4, 5, 6, 7, 8), 8192, 0, 0,),
                     destination: SocketAddrV6::new(
                         Ipv6Addr::new(65535, 65535, 32767, 32766, 111, 222, 333, 444),
                         0,
