@@ -733,7 +733,7 @@ mod encode_tests {
                 ProxyTransportProtocol::Unspec,
                 ProxyAddresses::Unspec,
             ),
-            signed(&[(2 << 4) | 0, 0, 0, 0][..]),
+            signed(&[2 << 4, 0, 0, 0][..]),
         );
 
         assert_eq!(
@@ -756,7 +756,7 @@ mod encode_tests {
             signed(
                 &[
                     (2 << 4) | 1,
-                    (1 << 4) | 0,
+                    1 << 4,
                     0,
                     12,
                     1,
@@ -819,7 +819,7 @@ mod encode_tests {
             ),
             signed(
                 &[
-                    (2 << 4) | 0,
+                    2 << 4,
                     (1 << 4) | 2,
                     0,
                     12,
@@ -863,7 +863,7 @@ mod encode_tests {
             ),
             signed(
                 &[
-                    (2 << 4) | 0,
+                    2 << 4,
                     (2 << 4) | 2,
                     0,
                     36,

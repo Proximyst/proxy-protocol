@@ -191,15 +191,15 @@ mod parse_tests {
         assert!(!buf.has_remaining()); // Consume the ENTIRE header!
 
         fn valid_v4(
-            (a, b, c, d): (u8, u8, u8, u8),
-            e: u16,
-            (f, g, h, i): (u8, u8, u8, u8),
-            j: u16,
+            (s0, s1, s2, s3): (u8, u8, u8, u8),
+            sp: u16,
+            (d0, d1, d2, d3): (u8, u8, u8, u8),
+            dp: u16,
         ) -> ProxyHeader {
             ProxyHeader::Version1 {
                 addresses: version1::ProxyAddresses::Ipv4 {
-                    source: SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), e),
-                    destination: SocketAddrV4::new(Ipv4Addr::new(f, g, h, i), j),
+                    source: SocketAddrV4::new(Ipv4Addr::new(s0, s1, s2, s3), sp),
+                    destination: SocketAddrV4::new(Ipv4Addr::new(d0, d1, d2, d3), dp),
                 },
             }
         }
@@ -223,15 +223,25 @@ mod parse_tests {
         );
 
         fn valid_v6(
-            (a, b, c, d, e, f, g, h): (u16, u16, u16, u16, u16, u16, u16, u16),
-            i: u16,
-            (j, k, l, m, n, o, p, q): (u16, u16, u16, u16, u16, u16, u16, u16),
-            r: u16,
+            (s0, s1, s2, s3, s4, s5, s6, s7): (u16, u16, u16, u16, u16, u16, u16, u16),
+            sp: u16,
+            (d0, d1, d2, d3, d4, d5, d6, d7): (u16, u16, u16, u16, u16, u16, u16, u16),
+            dp: u16,
         ) -> ProxyHeader {
             ProxyHeader::Version1 {
                 addresses: version1::ProxyAddresses::Ipv6 {
-                    source: SocketAddrV6::new(Ipv6Addr::new(a, b, c, d, e, f, g, h), i, 0, 0),
-                    destination: SocketAddrV6::new(Ipv6Addr::new(j, k, l, m, n, o, p, q), r, 0, 0),
+                    source: SocketAddrV6::new(
+                        Ipv6Addr::new(s0, s1, s2, s3, s4, s5, s6, s7),
+                        sp,
+                        0,
+                        0,
+                    ),
+                    destination: SocketAddrV6::new(
+                        Ipv6Addr::new(d0, d1, d2, d3, d4, d5, d6, d7),
+                        dp,
+                        0,
+                        0,
+                    ),
                 },
             }
         }
@@ -313,7 +323,7 @@ mod parse_tests {
             0x49,
             0x54,
             0x0A,
-            (2 << 4) | 0,
+            2 << 4,
         ];
         const PREFIX_PROXY: [u8; 13] = [
             0x0D,
