@@ -33,7 +33,7 @@ Revision history
                 reserved TLV type ranges, added TLV documentation, clarified
                 string encoding. With contributions from Andriy Palamarchuk
                 (Amazon.com).
-   2020/03/05 - added the unique ID TLV type (Tim DÃ¼sterhus)
+   2020/03/05 - added the unique ID TLV type (Tim Düsterhus)
 
 
 1. Background
