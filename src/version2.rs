@@ -1,5 +1,6 @@
 use bytes::{Buf, BufMut as _, BytesMut};
 use snafu::{ensure, Snafu};
+use std::convert::TryInto;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
 #[derive(Debug, Snafu)]
@@ -19,6 +20,28 @@ pub enum ParseError {
 
     #[snafu(display("insufficient length specified: {}, requires minimum {}", given, needs))]
     InsufficientLengthSpecified { given: usize, needs: usize },
+
+    #[snafu(display("invalid length specified: {}, causes overflow", given))]
+    LengthOverflow { given: usize },
+
+    #[snafu(display("invalid TLV type id specified: {}", type_id))]
+    InvalidTlvTypeId { type_id: u8 },
+
+    #[snafu(display("invalid UTF-8: {:?}", bytes))]
+    InvalidUtf8 { bytes: Vec<u8> },
+
+    #[snafu(display("invalid ASCII: {:?}", bytes))]
+    InvalidAscii { bytes: Vec<u8> },
+
+    #[snafu(display("trailing data: {:?}", len))]
+    TrailingData { len: usize },
+}
+
+#[derive(Debug, Snafu)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
+pub enum EncodeError {
+    #[snafu(display("value is too large to encode"))]
+    ValueTooLarge,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
@@ -59,6 +82,310 @@ enum ProxyAddressFamily {
     Unix,
 }
 
+trait Tlv: Sized {
+    /// Identifies the type
+    fn type_id(&self) -> u8;
+
+    /// The byte size of the value if encoded, or None if too big
+    fn value_len(&self) -> Result<u16, EncodeError>;
+
+    /// Write the value to the provided buffer
+    fn encode_value(&self, buf: &mut BytesMut) -> Result<(), EncodeError>;
+
+    fn encoded_len(&self) -> Result<u16, EncodeError> {
+        self.value_len()?
+            .checked_add(3)
+            .ok_or(EncodeError::ValueTooLarge)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
+        let vlen = self.value_len()?;
+        if vlen
+            .checked_add(3)
+            .map_or(true, |tlv_len| buf.remaining_mut() < tlv_len.into())
+        {
+            return Err(EncodeError::ValueTooLarge);
+        }
+        buf.put_u8(self.type_id());
+        buf.put_u16(vlen);
+        self.encode_value(buf)
+    }
+
+    // API note:
+    // We have to pass the len instead of using a view.
+    // Buf doesn't have a good view / subslice abstraction
+    // unlike plain slices or even the Bytes implementation
+    // IMHO (@g2p) it would be better for parse to receive a
+    // slice or a concrete type.
+    fn parse_parts(type_id: u8, len: u16, buf: &mut impl Buf) -> Result<Self, ParseError>;
+
+    fn parse(buf: &mut impl Buf) -> Result<Self, ParseError> {
+        if buf.remaining() < 3 {
+            return Err(ParseError::UnexpectedEof);
+        }
+        let type_id = buf.get_u8();
+        let vlen = buf.get_u16();
+        let expected_rem = buf
+            .remaining()
+            .checked_sub(vlen.into())
+            .ok_or(ParseError::UnexpectedEof)?;
+        let r = Self::parse_parts(type_id, vlen, buf)?;
+        // Assert, because it would be an internal error
+        assert_eq!(buf.remaining(), expected_rem);
+        Ok(r)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SslClientFlags(u8);
+
+impl SslClientFlags {
+    pub fn is_ssl_or_tls(&self) -> bool {
+        (self.0 & 1) == 1
+    }
+
+    pub fn client_authenticated_connection(&self) -> bool {
+        (self.0 & 2) == 2
+    }
+    pub fn client_authenticated_session(&self) -> bool {
+        (self.0 & 4) == 4
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SslVerifyStatus(u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "always_exhaustive"), non_exhaustive)] // Extensions may be added
+pub enum SslExtensionTlv {
+    /// TLS or SSL version in ASCII
+    Version(String),
+    /// TLS or SSL cipher suite in ASCII, for example "ECDHE-RSA-AES128-GCM-SHA256"
+    Cipher(String),
+    /// TLS or SSL signature algorithm in ASCII
+    SigAlg(String),
+    /// TLS or SSL key algorithm in ASCII
+    KeyAlg(String),
+    /// With client authentication, the common name for the client certificate in UTF-8
+    ClientCN(String),
+}
+
+impl SslExtensionTlv {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Version(version) => version,
+            Self::Cipher(cipher) => cipher,
+            Self::SigAlg(sigalg) => sigalg,
+            Self::KeyAlg(keyalg) => keyalg,
+            Self::ClientCN(cn) => cn,
+        }
+    }
+}
+
+impl Tlv for SslExtensionTlv {
+    fn type_id(&self) -> u8 {
+        match self {
+            Self::Version(_) => PP2_SUBTYPE_SSL_VERSION,
+            Self::ClientCN(_) => PP2_SUBTYPE_SSL_CN,
+            Self::Cipher(_) => PP2_SUBTYPE_SSL_CIPHER,
+            Self::SigAlg(_) => PP2_SUBTYPE_SSL_SIG_ALG,
+            Self::KeyAlg(_) => PP2_SUBTYPE_SSL_KEY_ALG,
+        }
+    }
+
+    fn value_len(&self) -> Result<u16, EncodeError> {
+        self.as_str()
+            .len()
+            .try_into()
+            .map_err(|_| EncodeError::ValueTooLarge)
+    }
+
+    fn encode_value(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
+        buf.put_slice(self.as_str().as_bytes());
+        Ok(())
+    }
+
+    fn parse_parts(type_id: u8, len: u16, buf: &mut impl Buf) -> Result<Self, ParseError> {
+        Ok(match type_id {
+            PP2_SUBTYPE_SSL_VERSION => Self::Version(ascii_from_buf(buf, len)?),
+            PP2_SUBTYPE_SSL_CIPHER => Self::Version(ascii_from_buf(buf, len)?),
+            PP2_SUBTYPE_SSL_SIG_ALG => Self::Version(ascii_from_buf(buf, len)?),
+            PP2_SUBTYPE_SSL_KEY_ALG => Self::Version(ascii_from_buf(buf, len)?),
+            PP2_SUBTYPE_SSL_CN => Self::Version(str_from_buf(buf, len)?),
+            _ => return Err(ParseError::InvalidTlvTypeId { type_id }),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ssl {
+    client: SslClientFlags,
+    verify: SslVerifyStatus,
+    extensions: Vec<SslExtensionTlv>,
+}
+
+impl Ssl {
+    fn parse(buf: &mut impl Buf, len: u16) -> Result<Self, ParseError> {
+        if buf.remaining() < len.into() {
+            return Err(ParseError::UnexpectedEof);
+        }
+        let mut ext_len = len
+            .checked_sub(5)
+            .ok_or(ParseError::InsufficientLengthSpecified {
+                given: len.into(),
+                needs: 5,
+            })?;
+        let client = SslClientFlags(buf.get_u8());
+        let verify = SslVerifyStatus(buf.get_u32());
+        let mut extensions = Vec::new();
+        while ext_len > 0 {
+            let rem0 = buf.remaining();
+            extensions.push(SslExtensionTlv::parse(buf)?);
+            let rem = buf.remaining();
+            // The assert enforces that Buf is implemented sanely
+            // and not rewound.
+            let parsed = rem0.checked_sub(rem).expect("Buf error");
+            // We don't enforce u16-sized buffers.
+            // Since we don't pass a bound on how much to parse,
+            // we can't enforce that the extension parser won't read
+            // (slightly) more than 64k.
+            // The assert is safe since ext_len was already u16 and the
+            // new value is lower.
+            ext_len = usize::from(ext_len)
+                .checked_sub(parsed)
+                .ok_or(ParseError::InsufficientLengthSpecified {
+                    given: ext_len.into(),
+                    needs: parsed,
+                })?
+                .try_into()
+                .expect("Math error");
+        }
+        Ok(Self {
+            client,
+            verify,
+            extensions,
+        })
+    }
+
+    fn encoded_len(&self) -> Result<u16, EncodeError> {
+        // 1 for flags, 4 for verify status, plus all nested TLVs
+        self.extensions
+            .iter()
+            .try_fold(5u16, |sum, subtlv| {
+                sum.checked_add(subtlv.encoded_len().ok()?)
+            })
+            .ok_or(EncodeError::ValueTooLarge)
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
+        buf.put_u8(self.client.0);
+        buf.put_u32(self.verify.0);
+        for ext in self.extensions.iter() {
+            ext.encode(buf)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "always_exhaustive"), non_exhaustive)] // Extensions may be added
+pub enum ExtensionTlv {
+    Alpn(Vec<u8>),
+    Authority(String),
+    Crc32c(u32),
+    UniqueId(Vec<u8>),
+    Ssl(Ssl),
+    NetNs(String),
+}
+
+pub(crate) const PP2_TYPE_ALPN: u8 = 0x01;
+pub(crate) const PP2_TYPE_AUTHORITY: u8 = 0x02;
+pub(crate) const PP2_TYPE_CRC32C: u8 = 0x03;
+pub(crate) const PP2_TYPE_NOOP: u8 = 0x04;
+pub(crate) const PP2_TYPE_UNIQUE_ID: u8 = 0x05;
+pub(crate) const PP2_TYPE_SSL: u8 = 0x20;
+pub(crate) const PP2_SUBTYPE_SSL_VERSION: u8 = 0x21;
+pub(crate) const PP2_SUBTYPE_SSL_CN: u8 = 0x22;
+pub(crate) const PP2_SUBTYPE_SSL_CIPHER: u8 = 0x23;
+pub(crate) const PP2_SUBTYPE_SSL_SIG_ALG: u8 = 0x24;
+pub(crate) const PP2_SUBTYPE_SSL_KEY_ALG: u8 = 0x25;
+pub(crate) const PP2_TYPE_NETNS: u8 = 0x30;
+
+fn vec_from_buf(buf: &mut impl Buf, len: u16) -> Vec<u8> {
+    let mut r = vec![0; len.into()];
+    buf.copy_to_slice(&mut r);
+    r
+}
+
+fn str_from_buf(buf: &mut impl Buf, len: u16) -> Result<String, ParseError> {
+    let v = vec_from_buf(buf, len);
+    let r = String::from_utf8(v).map_err(|e| ParseError::InvalidUtf8 {
+        bytes: e.into_bytes(),
+    })?;
+    Ok(r)
+}
+
+fn ascii_from_buf(buf: &mut impl Buf, len: u16) -> Result<String, ParseError> {
+    let s = str_from_buf(buf, len)?;
+    if !s.is_ascii() {
+        Err(ParseError::InvalidAscii {
+            bytes: s.into_bytes(),
+        })
+    } else {
+        Ok(s)
+    }
+}
+
+impl Tlv for ExtensionTlv {
+    fn type_id(&self) -> u8 {
+        match self {
+            Self::Alpn(_) => PP2_TYPE_ALPN,
+            Self::Authority(_) => PP2_TYPE_AUTHORITY,
+            Self::Crc32c(_) => PP2_TYPE_CRC32C,
+            Self::UniqueId(_) => PP2_TYPE_UNIQUE_ID,
+            Self::Ssl(_) => PP2_TYPE_SSL,
+            Self::NetNs(_) => PP2_TYPE_NETNS,
+        }
+    }
+
+    fn value_len(&self) -> Result<u16, EncodeError> {
+        match self {
+            Self::Alpn(alpn) => alpn.len(),
+            Self::Authority(authority) => authority.len(),
+            Self::Crc32c(_) => 4,
+            Self::UniqueId(id) => id.len(),
+            Self::Ssl(data) => data.encoded_len()?.into(),
+            Self::NetNs(netns) => netns.len(),
+        }
+        .try_into()
+        .map_err(|_| EncodeError::ValueTooLarge)
+    }
+
+    fn encode_value(&self, buf: &mut BytesMut) -> Result<(), EncodeError> {
+        match self {
+            Self::Alpn(by) | Self::UniqueId(by) => buf.put_slice(by),
+            Self::Authority(st) | Self::NetNs(st) => buf.put_slice(st.as_bytes()),
+            Self::Crc32c(crc) => buf.put_u32(*crc),
+            Self::Ssl(ssl) => ssl.encode(buf)?,
+        };
+        Ok(())
+    }
+
+    fn parse_parts(type_id: u8, len: u16, buf: &mut impl Buf) -> Result<Self, ParseError> {
+        Ok(match type_id {
+            PP2_TYPE_ALPN => Self::Alpn(vec_from_buf(buf, len)),
+            PP2_TYPE_AUTHORITY => Self::Authority(str_from_buf(buf, len)?),
+            PP2_TYPE_CRC32C => Self::Crc32c(buf.get_u32()),
+            PP2_TYPE_UNIQUE_ID => Self::UniqueId(vec_from_buf(buf, len)),
+            PP2_TYPE_SSL => Self::Ssl(Ssl::parse(buf, len)?),
+            PP2_TYPE_NETNS => Self::NetNs(ascii_from_buf(buf, len)?),
+            _ => return Err(ParseError::InvalidTlvTypeId { type_id }),
+        })
+    }
+}
+
+// Note: this is internal, assumes the first 12 bytes were parsed,
+// and ignores the version half of the first byte.
 pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError> {
     // We need to parse the following:
     //
@@ -71,9 +398,10 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
     //
     // `uint8_t *sig` was parsed in our caller.
     // We have ver_cmd next up; version is already parsed.
+    let st = buf.get_u8();
 
     // No ensure for command byte. We know it must exist.
-    let command = buf.get_u8() << 4 >> 4;
+    let command = st << 4 >> 4;
     let command = match command {
         0 => ProxyCommand::Local,
         1 => ProxyCommand::Proxy,
@@ -125,21 +453,21 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
 
     // The full length of address data,
     // including two addresses and two ports
-    let address_length = match address_family {
+    let address_len = match address_family {
         ProxyAddressFamily::Inet => (4 + 2) * 2,
         ProxyAddressFamily::Inet6 => (16 + 2) * 2,
         ProxyAddressFamily::Unix => 108 * 2,
         ProxyAddressFamily::Unspec => 0,
     };
 
-    ensure!(
-        length >= address_length,
-        InsufficientLengthSpecified {
-            given: length,
-            needs: address_length,
-        },
-    );
-    ensure!(buf.remaining() >= address_length, UnexpectedEof,);
+    let mut ext_len =
+        length
+            .checked_sub(address_len)
+            .ok_or(ParseError::InsufficientLengthSpecified {
+                given: length,
+                needs: address_len,
+            })?;
+    ensure!(buf.remaining() >= address_len, UnexpectedEof,);
 
     let addresses = match address_family {
         ProxyAddressFamily::Unspec => ProxyAddresses::Unspec,
@@ -187,23 +515,74 @@ pub(crate) fn parse(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError
         }
     };
 
-    if length > address_length {
-        // TODO(Mariell Hoversholm): Implement TLVs
-        buf.advance(length - address_length);
+    let mut extensions = Vec::new();
+    while ext_len > 0 {
+        // At this point, we know that remaining() >= ext_len
+        if buf.chunk()[0] == PP2_TYPE_NOOP {
+            if ext_len < 3 {
+                return Err(ParseError::InsufficientLengthSpecified {
+                    given: ext_len,
+                    needs: 3,
+                });
+            }
+            // Read/skip the type after peeking
+            buf.get_u8();
+            let skip_len = buf.get_u16();
+            let noop_len = 3u16
+                .checked_add(skip_len)
+                .ok_or(ParseError::LengthOverflow {
+                    given: skip_len.into(),
+                })?
+                .into();
+            if noop_len > ext_len {
+                return Err(ParseError::InsufficientLengthSpecified {
+                    given: ext_len,
+                    needs: noop_len,
+                });
+            }
+            ext_len -= noop_len;
+        } else {
+            let rem0 = buf.remaining();
+            extensions.push(ExtensionTlv::parse(buf)?);
+            let rem = buf.remaining();
+            let parsed = rem0.checked_sub(rem).expect("Buf error");
+            ext_len =
+                ext_len
+                    .checked_sub(parsed)
+                    .ok_or(ParseError::InsufficientLengthSpecified {
+                        given: ext_len,
+                        needs: parsed,
+                    })?;
+        }
     }
 
     Ok(super::ProxyHeader::Version2 {
         command,
         transport_protocol,
         addresses,
+        extensions,
     })
+}
+
+// Currently used in tests, has to be internal for the same reasons
+// parse() currently is.
+#[cfg(test)]
+pub(crate) fn parse_fully(buf: &mut impl Buf) -> Result<super::ProxyHeader, ParseError> {
+    let r = parse(buf)?;
+    if buf.has_remaining() {
+        return Err(ParseError::TrailingData {
+            len: buf.remaining(),
+        });
+    }
+    Ok(r)
 }
 
 pub(crate) fn encode(
     command: ProxyCommand,
     transport_protocol: ProxyTransportProtocol,
     addresses: ProxyAddresses,
-) -> BytesMut {
+    extensions: &[ExtensionTlv],
+) -> Result<BytesMut, EncodeError> {
     // > struct proxy_hdr_v2 {
     // >     uint8_t sig[12];  /* hex 0D 0A 0D 0A 00 0D 0A 51 55 49 54 0A */
     // >     uint8_t ver_cmd;  /* protocol version and command */
@@ -315,17 +694,27 @@ pub(crate) fn encode(
     // >          uint8_t dst_addr[108];
     // >     } unix_addr;
     // > };
-    let len = match addresses {
+    let address_len: u16 = match addresses {
         ProxyAddresses::Unspec => 0,
         ProxyAddresses::Unix { .. } => 108 + 108,
         ProxyAddresses::Ipv4 { .. } => 4 + 4 + 2 + 2,
         ProxyAddresses::Ipv6 { .. } => 16 + 16 + 2 + 2,
     };
+    // With extensions, we need to distinguish len and address_len
+    let len = extensions
+        .iter()
+        .try_fold(address_len, |acc, ext| {
+            acc.checked_add(ext.encoded_len().ok()?)
+        })
+        .ok_or(EncodeError::ValueTooLarge)?;
 
-    let mut buf = BytesMut::with_capacity(16 + len);
+    let blen = 16usize
+        .checked_add(len.into())
+        .ok_or(EncodeError::ValueTooLarge)?;
+    let mut buf = BytesMut::with_capacity(blen);
     buf.put_slice(&SIG[..]);
     buf.put_slice(&[ver_cmd, fam][..]);
-    buf.put_u16(len as u16);
+    buf.put_u16(len);
 
     match addresses {
         ProxyAddresses::Unspec => (),
@@ -356,7 +745,13 @@ pub(crate) fn encode(
         }
     }
 
-    buf
+    for ext in extensions.iter() {
+        ext.encode(&mut buf)?;
+    }
+
+    assert_eq!(buf.len(), blen);
+
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -371,23 +766,23 @@ mod parse_tests {
     #[test]
     fn test_unspec() {
         assert_eq!(
-            parse(&mut &[0u8; 16][..]),
+            parse_fully(&mut &[0u8; 4][..]),
             Ok(ProxyHeader::Version2 {
                 command: ProxyCommand::Local,
                 addresses: ProxyAddresses::Unspec,
                 transport_protocol: ProxyTransportProtocol::Unspec,
+                extensions: Vec::new(),
             }),
         );
 
-        let mut prefix = BytesMut::from(&[1u8][..]);
-        prefix.reserve(16);
-        prefix.extend_from_slice(&[0u8; 16][..]);
+        let mut prefix = BytesMut::from(&[1u8, 0, 0, 0][..]);
         assert_eq!(
-            parse(&mut prefix),
+            parse_fully(&mut prefix),
             Ok(ProxyHeader::Version2 {
                 command: ProxyCommand::Proxy,
                 addresses: ProxyAddresses::Unspec,
                 transport_protocol: ProxyTransportProtocol::Unspec,
+                extensions: Vec::new(),
             }),
         );
     }
@@ -395,7 +790,7 @@ mod parse_tests {
     #[test]
     fn test_ipv4() {
         assert_eq!(
-            parse(
+            parse_fully(
                 &mut &[
                     // Proxy command
                     1u8,
@@ -424,7 +819,7 @@ mod parse_tests {
                     1,
                     1,
                     // TLV
-                    69,
+                    PP2_TYPE_NOOP,
                     0,
                     0,
                 ][..]
@@ -436,6 +831,7 @@ mod parse_tests {
                     source: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 65535),
                     destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 257),
                 },
+                extensions: Vec::new(),
             })
         );
 
@@ -480,6 +876,7 @@ mod parse_tests {
                     source: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
                     destination: SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 255 << 8),
                 },
+                extensions: Vec::new(),
             })
         );
         assert!(data.remaining() == 4); // Consume the entire header
@@ -488,7 +885,7 @@ mod parse_tests {
     #[test]
     fn test_ipv6() {
         assert_eq!(
-            parse(
+            parse_fully(
                 &mut &[
                     // Proxy command
                     1u8,
@@ -541,7 +938,7 @@ mod parse_tests {
                     1,
                     1,
                     // TLV
-                    69,
+                    PP2_TYPE_NOOP,
                     0,
                     0,
                 ][..]
@@ -563,6 +960,7 @@ mod parse_tests {
                         0,
                     ),
                 },
+                extensions: Vec::new(),
             })
         );
 
@@ -641,6 +1039,7 @@ mod parse_tests {
                         0,
                     ),
                 },
+                extensions: Vec::new(),
             })
         );
         assert!(data.remaining() == 4); // Consume the entire header
@@ -651,12 +1050,12 @@ mod parse_tests {
         let mut data = [0u8; 200];
         rand::thread_rng().fill_bytes(&mut data);
         data[0] = 99; // Make 100% sure it's invalid.
-        assert!(parse(&mut &data[..]).is_err());
+        assert!(parse_fully(&mut &data[..]).is_err());
 
-        assert_eq!(parse(&mut &[0][..]), Err(ParseError::UnexpectedEof));
+        assert_eq!(parse_fully(&mut &[0][..]), Err(ParseError::UnexpectedEof));
 
         assert_eq!(
-            parse(
+            parse_fully(
                 &mut &[
                     // Proxy command
                     1u8,
@@ -677,12 +1076,86 @@ mod parse_tests {
             }),
         );
     }
+
+    #[test]
+    fn test_tlv() {
+        use super::ExtensionTlv::*;
+        use super::SslExtensionTlv::*;
+
+        assert_eq!(
+            parse_fully(
+                &mut &[
+                    // Proxy command
+                    1u8,
+                    // Connection type: Unknown
+                    0,
+                    // TLV length: 3 + 2 + 3 + 11 + 3 + 15
+                    0,
+                    37,
+                    PP2_TYPE_ALPN,
+                    0,
+                    2,
+                    // h2
+                    0x68,
+                    0x32,
+                    PP2_TYPE_AUTHORITY,
+                    0,
+                    11,
+                    // example.org
+                    0x65,
+                    0x78,
+                    0x61,
+                    0x6d,
+                    0x70,
+                    0x6c,
+                    0x65,
+                    0x2e,
+                    0x6f,
+                    0x72,
+                    0x67,
+                    PP2_TYPE_SSL,
+                    0,
+                    15,
+                    0x07,
+                    0,
+                    0,
+                    0,
+                    0,
+                    PP2_SUBTYPE_SSL_VERSION,
+                    0,
+                    7,
+                    // TLSv1.3.  This is from OpenSSL, to match haproxy.
+                    0x54,
+                    0x4c,
+                    0x53,
+                    0x76,
+                    0x31,
+                    0x2e,
+                    0x33,
+                ][..]
+            ),
+            Ok(ProxyHeader::Version2 {
+                command: ProxyCommand::Proxy,
+                addresses: ProxyAddresses::Unspec,
+                transport_protocol: ProxyTransportProtocol::Unspec,
+                extensions: vec![
+                    Alpn(b"h2".to_vec()),
+                    Authority("example.org".to_string()),
+                    Ssl(super::Ssl {
+                        client: SslClientFlags(7),
+                        verify: SslVerifyStatus(0),
+                        extensions: vec![Version("TLSv1.3".to_string()),],
+                    }),
+                ],
+            }),
+        );
+    }
 }
 
 #[cfg(test)]
 mod encode_tests {
     use super::*;
-    use bytes::{Bytes, BytesMut};
+    use bytes::BytesMut;
     use pretty_assertions::assert_eq;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -690,10 +1163,10 @@ mod encode_tests {
         0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
     ];
 
-    fn signed(buf: &[u8]) -> Bytes {
+    fn signed(buf: &[u8]) -> BytesMut {
         let mut bytes = BytesMut::from(&SIG[..]);
         bytes.extend_from_slice(buf);
-        bytes.freeze()
+        bytes
     }
 
     #[test]
@@ -703,8 +1176,9 @@ mod encode_tests {
                 ProxyCommand::Local,
                 ProxyTransportProtocol::Unspec,
                 ProxyAddresses::Unspec,
+                &[],
             ),
-            signed(&[2 << 4, 0, 0, 0][..]),
+            Ok(signed(&[2 << 4, 0, 0, 0][..])),
         );
 
         assert_eq!(
@@ -712,8 +1186,9 @@ mod encode_tests {
                 ProxyCommand::Proxy,
                 ProxyTransportProtocol::Unspec,
                 ProxyAddresses::Unspec,
+                &[],
             ),
-            signed(&[(2 << 4) | 1, 0, 0, 0][..]),
+            Ok(signed(&[(2 << 4) | 1, 0, 0, 0][..])),
         );
         assert_eq!(
             encode(
@@ -723,8 +1198,9 @@ mod encode_tests {
                     source: SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 65535),
                     destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 9012),
                 },
+                &[],
             ),
-            signed(
+            Ok(signed(
                 &[
                     (2 << 4) | 1,
                     1 << 4,
@@ -743,7 +1219,7 @@ mod encode_tests {
                     (9012u16 >> 8) as u8,
                     9012u16 as u8,
                 ][..]
-            ),
+            )),
         );
     }
 
@@ -757,8 +1233,9 @@ mod encode_tests {
                     source: SocketAddrV4::new(Ipv4Addr::new(1, 2, 3, 4), 65535),
                     destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 9012),
                 },
+                &[],
             ),
-            signed(
+            Ok(signed(
                 &[
                     (2 << 4) | 1,
                     (1 << 4) | 1,
@@ -777,7 +1254,7 @@ mod encode_tests {
                     (9012u16 >> 8) as u8,
                     9012u16 as u8,
                 ][..]
-            ),
+            )),
         );
         assert_eq!(
             encode(
@@ -787,8 +1264,9 @@ mod encode_tests {
                     source: SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 324),
                     destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 2187),
                 },
+                &[],
             ),
-            signed(
+            Ok(signed(
                 &[
                     2 << 4,
                     (1 << 4) | 2,
@@ -807,7 +1285,7 @@ mod encode_tests {
                     (2187 >> 8) as u8,
                     2187u16 as u8,
                 ][..]
-            ),
+            )),
         );
     }
 
@@ -825,9 +1303,10 @@ mod encode_tests {
                         0,
                         0,
                     ),
-                }
+                },
+                &[],
             ),
-            signed(
+            Ok(signed(
                 &[
                     2 << 4,
                     (2 << 4) | 2,
@@ -870,7 +1349,82 @@ mod encode_tests {
                     0,
                     0,
                 ][..]
+            )),
+        );
+    }
+
+    #[test]
+    fn test_tlv() {
+        use super::ExtensionTlv::*;
+        use super::SslExtensionTlv::*;
+
+        assert_eq!(
+            encode(
+                ProxyCommand::Proxy,
+                ProxyTransportProtocol::Unspec,
+                ProxyAddresses::Unspec,
+                &[
+                    Alpn(b"h2".to_vec()),
+                    Authority("example.org".to_string()),
+                    Ssl(super::Ssl {
+                        client: SslClientFlags(7),
+                        verify: SslVerifyStatus(0),
+                        extensions: vec![Version("TLSv1.3".to_string()),],
+                    }),
+                ],
             ),
+            Ok(signed(
+                &[
+                    // Version 2,
+                    // Proxy command
+                    0x21u8,
+                    // Connection type: Unknown
+                    0,
+                    // TLV length: 3 + 2 + 3 + 11 + 3 + 15
+                    0,
+                    37,
+                    PP2_TYPE_ALPN,
+                    0,
+                    2,
+                    // h2
+                    0x68,
+                    0x32,
+                    PP2_TYPE_AUTHORITY,
+                    0,
+                    11,
+                    // example.org
+                    0x65,
+                    0x78,
+                    0x61,
+                    0x6d,
+                    0x70,
+                    0x6c,
+                    0x65,
+                    0x2e,
+                    0x6f,
+                    0x72,
+                    0x67,
+                    PP2_TYPE_SSL,
+                    0,
+                    15,
+                    0x07,
+                    0,
+                    0,
+                    0,
+                    0,
+                    PP2_SUBTYPE_SSL_VERSION,
+                    0,
+                    7,
+                    // TLSv1.3.  This is from OpenSSL, to match haproxy.
+                    0x54,
+                    0x4c,
+                    0x53,
+                    0x76,
+                    0x31,
+                    0x2e,
+                    0x33,
+                ][..]
+            )),
         );
     }
 }

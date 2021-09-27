@@ -43,6 +43,9 @@ pub enum EncodeError {
     /// An error occurred while encoding version 1.
     #[snafu(display("there was an error while encoding the v1 header: {}", source))]
     WriteVersion1 { source: version1::EncodeError },
+    /// An error occurred while encoding version 2.
+    #[snafu(display("there was an error while encoding the v2 header: {}", source))]
+    WriteVersion2 { source: version2::EncodeError },
 }
 
 /// The PROXY header emitted at most once at the start of a new connection.
@@ -70,6 +73,7 @@ pub enum ProxyHeader {
 
         /// The addresses used to connect to the proxy.
         addresses: version2::ProxyAddresses,
+        extensions: Vec<version2::ExtensionTlv>,
     },
 }
 
@@ -150,7 +154,9 @@ pub fn encode(header: ProxyHeader) -> Result<BytesMut, EncodeError> {
             command,
             transport_protocol,
             addresses,
-        } => version2::encode(command, transport_protocol, addresses),
+            extensions,
+        } => version2::encode(command, transport_protocol, addresses, &extensions[..])
+            .context(WriteVersion2)?,
 
         #[allow(unreachable_patterns)] // May be required to be exhaustive.
         _ => unimplemented!("Unimplemented version?"),
@@ -347,6 +353,7 @@ mod parse_tests {
                 command: version2::ProxyCommand::Local,
                 addresses: version2::ProxyAddresses::Unspec,
                 transport_protocol: version2::ProxyTransportProtocol::Unspec,
+                extensions: Vec::new(),
             }),
         );
         assert_eq!(
@@ -355,6 +362,7 @@ mod parse_tests {
                 command: version2::ProxyCommand::Proxy,
                 addresses: version2::ProxyAddresses::Unspec,
                 transport_protocol: version2::ProxyTransportProtocol::Unspec,
+                extensions: Vec::new(),
             }),
         );
 
@@ -388,7 +396,7 @@ mod parse_tests {
                         1,
                         1,
                         // TLV
-                        69,
+                        version2::PP2_TYPE_NOOP,
                         0,
                         0,
                     ][..]
@@ -403,6 +411,7 @@ mod parse_tests {
                     source: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 65535),
                     destination: SocketAddrV4::new(Ipv4Addr::new(192, 168, 0, 1), 257),
                 },
+                extensions: Vec::new(),
             })
         );
 
@@ -449,6 +458,7 @@ mod parse_tests {
                     source: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
                     destination: SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 255 << 8),
                 },
+                extensions: Vec::new(),
             })
         );
         assert!(data.remaining() == 4); // Consume the entire header
@@ -507,7 +517,7 @@ mod parse_tests {
                         1,
                         1,
                         // TLV
-                        69,
+                        version2::PP2_TYPE_NOOP,
                         0,
                         0,
                     ][..],
@@ -532,6 +542,7 @@ mod parse_tests {
                         0,
                     )
                 },
+                extensions: Vec::new(),
             })
         );
 
@@ -612,6 +623,7 @@ mod parse_tests {
                         0,
                     ),
                 },
+                extensions: Vec::new(),
             })
         );
         assert!(data.remaining() == 4); // Consume the entire header
