@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut as _, BytesMut};
 use snafu::{ensure, Snafu};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 #[derive(Debug, Snafu)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
@@ -49,6 +49,25 @@ pub enum ProxyAddresses {
         source: [u8; 108],
         destination: [u8; 108],
     },
+}
+
+impl ProxyAddresses {
+    /// Construct IPv4 or IPv6 from given source and destination address.
+    ///
+    /// Returns `None` if the addresses use a different IP version.
+    pub fn from_socket_addrs(source: SocketAddr, destination: SocketAddr) -> Option<Self> {
+        match (source, destination) {
+            (SocketAddr::V4(source), SocketAddr::V4(destination)) => Some(Self::Ipv4 {
+                source,
+                destination,
+            }),
+            (SocketAddr::V6(source), SocketAddr::V6(destination)) => Some(Self::Ipv6 {
+                source,
+                destination,
+            }),
+            (_, _) => None,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]
